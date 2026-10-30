@@ -8,8 +8,16 @@ from pathlib import Path
 from uuid import uuid4
 
 import flet as ft
-import pytesseract
-from PIL import Image
+
+try:
+    import pytesseract
+except ModuleNotFoundError:  # optional OCR dependency
+    pytesseract = None
+
+try:
+    from PIL import Image
+except ModuleNotFoundError:  # optional OCR dependency
+    Image = None
 
 
 DATA_FILE = Path.home() / ".food_expiry_tracker.json"
@@ -24,6 +32,8 @@ EXPIRY_TYPES = {
     "use_by": "消費期限",
     "use_date": "使用期限",
 }
+FOOD_CATEGORIES = ("肉", "魚", "野菜", "果物", "お菓子", "その他")
+DEFAULT_CATEGORY = "その他"
 
 
 def normalize_name(value):
@@ -107,6 +117,8 @@ def load_foods():
         ):
             continue
         food["name"] = normalize_name(food.get("name"))
+        if food.get("category") not in FOOD_CATEGORIES:
+            food["category"] = DEFAULT_CATEGORY
         try:
             date.fromisoformat(food.get("expiry_date", ""))
         except (TypeError, ValueError):
@@ -129,6 +141,7 @@ def main(page: ft.Page):
 
     foods = load_foods()
     current_filter = "all"
+    current_category = "all"
     selected_photo = None
     photo_picker = ft.FilePicker()
     page.services.append(photo_picker)
@@ -169,6 +182,15 @@ def main(page: ft.Page):
         focused_border_color=GREEN,
         bgcolor="#FFFEFA",
     )
+    category_input = ft.Dropdown(
+        label="ジャンル",
+        value=DEFAULT_CATEGORY,
+        options=[ft.DropdownOption(key=category, text=category) for category in FOOD_CATEGORIES],
+        border_radius=6,
+        border_color="#D4DED5",
+        focused_border_color=GREEN,
+        bgcolor="#FFFEFA",
+    )
     photo_preview = ft.Container(visible=False)
     privacy_note = ft.Text(
         "写真はなくてもOKです。顔や個人情報が写る写真は避けてください。",
@@ -180,6 +202,29 @@ def main(page: ft.Page):
     food_count = ft.Text(color=MUTED, size=12)
     summary_text = ft.Text(color=MUTED, size=11)
     filter_buttons = {}
+    search_input = ft.TextField(
+        label="登録済み商品を検索",
+        hint_text="商品名を入力",
+        prefix_icon=ft.Icons.SEARCH,
+        border_radius=6,
+        border_color="#D4DED5",
+        focused_border_color=GREEN,
+        bgcolor="#FFFEFA",
+        on_change=lambda event: render(),
+    )
+    category_filter = ft.Dropdown(
+        value="all",
+        options=[
+            ft.DropdownOption(key="all", text="全ジャンル"),
+            *[ft.DropdownOption(key=category, text=category) for category in FOOD_CATEGORIES],
+        ],
+        width=150,
+        border_radius=6,
+        border_color="#D4DED5",
+        focused_border_color=GREEN,
+        bgcolor="#FFFEFA",
+        on_select=lambda event: set_category_filter(event.control.value),
+    )
 
     def persist():
         try:
@@ -196,8 +241,13 @@ def main(page: ft.Page):
         current_filter = value
         render()
 
+    def set_category_filter(value):
+        nonlocal current_category
+        current_category = value
+        render()
+
     def add_food(event):
-        nonlocal selected_photo
+        nonlocal selected_photo, current_category
         name = normalize_name(name_input.value)
         try:
             expiry_date = date.fromisoformat((expiry_input.value or "").strip())
@@ -212,6 +262,7 @@ def main(page: ft.Page):
             "name": name,
             "expiry_date": expiry_date.isoformat(),
             "expiry_type": expiry_type_input.value,
+            "category": category_input.value,
             "eaten": False,
         }
         if selected_photo:
@@ -223,6 +274,8 @@ def main(page: ft.Page):
             selected_photo = None
             photo_preview.content = None
             photo_preview.visible = False
+        current_category = "all"
+        category_filter.value = "all"
         set_filter("all")
 
     async def choose_photo(event):
@@ -306,13 +359,18 @@ def main(page: ft.Page):
 
     def render():
         today = date.today()
+        search_query = (search_input.value or "").strip().casefold()
         visible_foods = [
             food
             for food in foods
-            if current_filter == "all"
-            or (current_filter == "soon" and not food["eaten"]
-                and date.fromisoformat(food["expiry_date"]) <= today + timedelta(days=3))
-            or (current_filter == "eaten" and food["eaten"])
+            if (not search_query or search_query in food["name"].casefold())
+            and (current_category == "all" or food["category"] == current_category)
+            and (
+                current_filter == "all"
+                or (current_filter == "soon" and not food["eaten"]
+                    and date.fromisoformat(food["expiry_date"]) <= today + timedelta(days=3))
+                or (current_filter == "eaten" and food["eaten"])
+            )
         ]
         visible_foods.sort(key=lambda food: (food["eaten"], food["expiry_date"], food["name"]))
         uneaten_count = sum(not food["eaten"] for food in foods)
@@ -351,6 +409,7 @@ def main(page: ft.Page):
                 ft.Row(
                     [
                         ft.Text(food["name"], size=15, color=INK, weight=ft.FontWeight.W_600, expand=True),
+                        ft.Text(food["category"], size=11, color=GREEN),
                         ft.Text(status, size=12, color=status_color, weight=ft.FontWeight.BOLD),
                     ],
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -392,7 +451,9 @@ def main(page: ft.Page):
 
         if not visible_foods:
             empty_text = (
-                "もうすぐ期限のものはありません。"
+                "検索条件に一致する商品がありません。"
+                if search_query
+                else "もうすぐ期限のものはありません。"
                 if current_filter == "soon"
                 else "まだ使った記録はありません。"
                 if current_filter == "eaten"
@@ -427,6 +488,7 @@ def main(page: ft.Page):
     composer = ft.Column(
         [
             name_input,
+            category_input,
             ft.Row(
                 [
                     expiry_input,
@@ -495,12 +557,20 @@ def main(page: ft.Page):
                     [
                         ft.Container(content=composer, padding=18, bgcolor=GREEN_LIGHT),
                         ft.Container(
+                            content=search_input,
+                            padding=ft.Padding(left=18, right=18, top=14, bottom=4),
+                        ),
+                        ft.Container(
                             content=ft.Row(
                                 [ft.Row(list(filter_buttons.values()), spacing=0), food_count],
                                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                             ),
                             padding=ft.Padding(left=18, right=18, top=8, bottom=8),
                             border=ft.Border.only(bottom=ft.BorderSide(1, "#DEDFD5")),
+                        ),
+                        ft.Container(
+                            content=category_filter,
+                            padding=ft.Padding(left=18, right=18, top=8, bottom=4),
                         ),
                         ft.Container(content=food_list, padding=ft.Padding.symmetric(horizontal=18)),
                         ft.Container(
@@ -546,4 +616,4 @@ def main(page: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.run(main, view=ft.AppView.WEB_BROWSER)
+    ft.run(main, view=ft.AppView.WEB_BROWSER, port=8550)
