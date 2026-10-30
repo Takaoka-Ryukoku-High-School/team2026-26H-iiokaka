@@ -1,127 +1,327 @@
+import base64
 import json
+import re
+from datetime import date, datetime, timedelta
+from io import BytesIO
+from mimetypes import guess_type
 from pathlib import Path
 from uuid import uuid4
 
 import flet as ft
+import pytesseract
+from PIL import Image
 
 
-DATA_FILE = Path.home() / ".daily_note_tasks.json"
+DATA_FILE = Path.home() / ".food_expiry_tracker.json"
 GREEN = "#2E6654"
 GREEN_LIGHT = "#E2EDE5"
 PAPER = "#F6F5EF"
 INK = "#202C2A"
 MUTED = "#77807B"
 CORAL = "#CF6048"
+EXPIRY_TYPES = {
+    "best_before": "賞味期限",
+    "use_by": "消費期限",
+    "use_date": "使用期限",
+}
 
 
-def load_tasks():
+def normalize_name(value):
+    cleaned = (value or "").strip()
+    return cleaned if cleaned else "商品"
+
+
+def parse_date_string(value):
+    if not value:
+        return None
+    cleaned = re.sub(r"\s+", "", str(value))
+    cleaned = cleaned.replace("／", "/").replace("。", ".").replace("年", "-").replace("月", "-").replace("日", "")
+    cleaned = cleaned.replace(".", "-")
+    cleaned = cleaned.replace("/", "-")
+    cleaned = re.sub(r"-+", "-", cleaned)
+
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d", "%y-%m-%d"):
+        try:
+            parsed = datetime.strptime(cleaned, fmt)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def extract_expiry_from_text(text):
+    if not text:
+        return None
+    normalized = text.replace("\n", " ")
+    patterns = [
+        ("best_before", r"(?:賞味期限|BEST\s*BEFORE|BESTBEFORE|best\s*before)",),
+        ("use_by", r"(?:消費期限|USE\s*BY|USEBY|use\s*by)",),
+        ("use_date", r"(?:使用期限|USE\s*DATE|USEDATE|use\s*date)",),
+    ]
+    date_pattern = r"\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|\d{4}\.\d{1,2}\.\d{1,2}"
+    for key, pattern in patterns:
+        match = re.search(rf"{pattern}\s*[:：]*\s*({date_pattern})", normalized, flags=re.IGNORECASE)
+        if not match:
+            match = re.search(rf"({date_pattern})\s*[:：]*\s*{pattern}", normalized, flags=re.IGNORECASE)
+        if not match:
+            continue
+        date_text = match.group(1)
+        parsed = parse_date_string(date_text)
+        if parsed:
+            return parsed, key
+    return None
+
+
+def scan_expiry_from_image_bytes(image_bytes):
+    if not image_bytes:
+        return None
     try:
-        tasks = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        if isinstance(tasks, list):
-            return [
-                task
-                for task in tasks
-                if isinstance(task, dict)
-                and isinstance(task.get("id"), str)
-                and isinstance(task.get("text"), str)
-                and isinstance(task.get("done"), bool)
-            ]
+        image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        text = pytesseract.image_to_string(image, lang="jpn+eng", config="--psm 6")
+    except Exception:
+        return None
+    if not text:
+        return None
+    return extract_expiry_from_text(text)
+
+
+def load_foods():
+    try:
+        foods = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        pass
-    return []
+        return []
+
+    if not isinstance(foods, list):
+        return []
+
+    valid_foods = []
+    for food in foods:
+        if not isinstance(food, dict):
+            continue
+        if (
+            not isinstance(food.get("id"), str)
+            or not isinstance(food.get("name"), str)
+            or food.get("expiry_type") not in EXPIRY_TYPES
+            or not isinstance(food.get("eaten"), bool)
+            or ("image" in food and not isinstance(food["image"], str))
+        ):
+            continue
+        food["name"] = normalize_name(food.get("name"))
+        try:
+            date.fromisoformat(food.get("expiry_date", ""))
+        except (TypeError, ValueError):
+            continue
+        valid_foods.append(food)
+    return valid_foods
 
 
-def save_tasks(tasks):
-    DATA_FILE.write_text(json.dumps(tasks, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_foods(foods):
+    DATA_FILE.write_text(json.dumps(foods, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main(page: ft.Page):
-    page.title = "今日の段取り | ToDo"
+    page.title = "たべごろ | 期限管理"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.bgcolor = PAPER
     page.padding = 24
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
     page.scroll = ft.ScrollMode.AUTO
 
-    tasks = load_tasks()
+    foods = load_foods()
     current_filter = "all"
+    selected_photo = None
+    photo_picker = ft.FilePicker()
+    page.services.append(photo_picker)
 
-    task_input = ft.TextField(
-        hint_text="次にやることは？",
-        expand=True,
-        autofocus=True,
+    name_input = ft.TextField(
+        label="商品名（入力しなくてもOK）",
+        hint_text="例：牛乳、薬、日焼け止め",
         border_radius=6,
         border_color="#D4DED5",
         focused_border_color=GREEN,
         bgcolor="#FFFEFA",
         text_size=15,
-        on_submit=lambda event: add_task(event),
+        autofocus=True,
     )
-    task_list = ft.Column(spacing=0)
-    task_count = ft.Text(color=MUTED, size=12)
-    progress_label = ft.Text(color=MUTED, size=11)
-    clear_done_button = ft.TextButton(
-        "完了した項目を削除",
-        icon=ft.Icons.DELETE_OUTLINE,
-        style=ft.ButtonStyle(color=CORAL),
-        on_click=lambda event: clear_done(event),
+    expiry_input = ft.TextField(
+        label="期限",
+        hint_text="YYYY-MM-DD",
+        tooltip="例：2026-10-31",
+        expand=True,
+        border_radius=6,
+        border_color="#D4DED5",
+        focused_border_color=GREEN,
+        bgcolor="#FFFEFA",
+        text_size=15,
+        keyboard_type=ft.KeyboardType.DATETIME,
+        on_submit=lambda event: add_food(event),
     )
+    expiry_type_input = ft.Dropdown(
+        value="best_before",
+        options=[
+            ft.DropdownOption(key="best_before", text="賞味期限"),
+            ft.DropdownOption(key="use_by", text="消費期限"),
+            ft.DropdownOption(key="use_date", text="使用期限"),
+        ],
+        width=170,
+        border_radius=6,
+        border_color="#D4DED5",
+        focused_border_color=GREEN,
+        bgcolor="#FFFEFA",
+    )
+    photo_preview = ft.Container(visible=False)
+    privacy_note = ft.Text(
+        "写真はなくてもOKです。顔や個人情報が写る写真は避けてください。",
+        size=11,
+        color=MUTED,
+    )
+    message_text = ft.Text(size=12, color=CORAL, visible=False)
+    food_list = ft.Column(spacing=0)
+    food_count = ft.Text(color=MUTED, size=12)
+    summary_text = ft.Text(color=MUTED, size=11)
     filter_buttons = {}
 
     def persist():
         try:
-            save_tasks(tasks)
-            progress_label.value = f"{sum(task['done'] for task in tasks)} / {len(tasks)} 件 完了"
+            save_foods(foods)
+            message_text.visible = False
+            return True
         except OSError:
-            progress_label.value = "保存できませんでした。書き込み権限をご確認ください。"
+            message_text.value = "保存できませんでした。書き込み権限をご確認ください。"
+            message_text.visible = True
+            return False
 
     def set_filter(value):
         nonlocal current_filter
         current_filter = value
         render()
 
-    def add_task(event):
-        text = task_input.value.strip()
-        if not text:
+    def add_food(event):
+        nonlocal selected_photo
+        name = normalize_name(name_input.value)
+        try:
+            expiry_date = date.fromisoformat((expiry_input.value or "").strip())
+        except ValueError:
+            message_text.value = "期限を YYYY-MM-DD 形式で入力してください。"
+            message_text.visible = True
+            page.update()
             return
-        tasks.insert(0, {"id": str(uuid4()), "text": text, "done": False})
-        task_input.value = ""
-        persist()
+
+        food = {
+            "id": str(uuid4()),
+            "name": name,
+            "expiry_date": expiry_date.isoformat(),
+            "expiry_type": expiry_type_input.value,
+            "eaten": False,
+        }
+        if selected_photo:
+            food["image"] = selected_photo
+        foods.append(food)
+        if persist():
+            name_input.value = ""
+            expiry_input.value = ""
+            selected_photo = None
+            photo_preview.content = None
+            photo_preview.visible = False
         set_filter("all")
 
-    def toggle_task(task_id):
-        for task in tasks:
-            if task["id"] == task_id:
-                task["done"] = not task["done"]
+    async def choose_photo(event):
+        nonlocal selected_photo
+        files = await photo_picker.pick_files(
+            dialog_title="商品の写真を撮る / 選ぶ",
+            file_type=ft.FilePickerFileType.IMAGE,
+            allow_multiple=False,
+            with_data=True,
+            compression_quality=70,
+        )
+        if not files:
+            return
+        photo = files[0]
+        if photo.bytes is None:
+            message_text.value = "写真を読み込めませんでした。もう一度お試しください。"
+            message_text.visible = True
+            page.update()
+            return
+        mime_type = guess_type(photo.name)[0] or "image/jpeg"
+        encoded_photo = base64.b64encode(photo.bytes).decode("ascii")
+        selected_photo = f"data:{mime_type};base64,{encoded_photo}"
+        detected = scan_expiry_from_image_bytes(photo.bytes)
+        if detected:
+            expiry_date, expiry_type = detected
+            expiry_input.value = expiry_date
+            expiry_type_input.value = expiry_type
+            message_text.value = f"写真から期限を読み取りました: {expiry_date}"
+            message_text.visible = True
+        else:
+            message_text.visible = False
+        photo_preview.content = ft.Row(
+            [
+                ft.Image(
+                    src=selected_photo,
+                    width=96,
+                    height=72,
+                    fit=ft.BoxFit.COVER,
+                    border_radius=6,
+                ),
+                ft.Text(f"写真を追加しました: {photo.name}", size=12, color=GREEN),
+                ft.TextButton("写真を外す", on_click=remove_photo),
+            ],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        photo_preview.visible = True
+        page.update()
+
+    def remove_photo(event):
+        nonlocal selected_photo
+        selected_photo = None
+        photo_preview.content = None
+        photo_preview.visible = False
+        page.update()
+
+    def toggle_eaten(food_id):
+        for food in foods:
+            if food["id"] == food_id:
+                food["eaten"] = not food["eaten"]
                 break
         persist()
         render()
 
-    def delete_task(task_id):
-        tasks[:] = [task for task in tasks if task["id"] != task_id]
+    def delete_food(food_id):
+        foods[:] = [food for food in foods if food["id"] != food_id]
         persist()
         render()
 
-    def clear_done(event):
-        tasks[:] = [task for task in tasks if not task["done"]]
-        persist()
-        render()
+    def expiry_status(food):
+        days_left = (date.fromisoformat(food["expiry_date"]) - date.today()).days
+        if days_left < 0:
+            return f"期限から {abs(days_left)} 日", CORAL
+        if days_left == 0:
+            return "今日まで", CORAL
+        if days_left == 1:
+            return "あと1日", CORAL
+        if days_left <= 3:
+            return f"あと{days_left}日", "#9A7629"
+        return f"あと{days_left}日", GREEN
 
     def render():
-        visible_tasks = [
-            task
-            for task in tasks
+        today = date.today()
+        visible_foods = [
+            food
+            for food in foods
             if current_filter == "all"
-            or (current_filter == "active" and not task["done"])
-            or (current_filter == "done" and task["done"])
+            or (current_filter == "soon" and not food["eaten"]
+                and date.fromisoformat(food["expiry_date"]) <= today + timedelta(days=3))
+            or (current_filter == "eaten" and food["eaten"])
         ]
-        remaining = sum(not task["done"] for task in tasks)
-        completed = len(tasks) - remaining
-        task_count.value = f"未完了 {remaining} 件"
-        progress_label.value = (
-            f"{completed} / {len(tasks)} 件 完了" if tasks else "タスクはまだありません"
+        visible_foods.sort(key=lambda food: (food["eaten"], food["expiry_date"], food["name"]))
+        uneaten_count = sum(not food["eaten"] for food in foods)
+        food_count.value = f"まだ使う: {uneaten_count} 個"
+        summary_text.value = (
+            f"使ったもの: {len(foods) - uneaten_count} 個"
+            if foods
+            else "商品を登録して、期限を忘れないようにしましょう"
         )
-        clear_done_button.visible = completed > 0
 
         for key, button in filter_buttons.items():
             selected = key == current_filter
@@ -132,39 +332,71 @@ def main(page: ft.Page):
             )
 
         rows = []
-        for task in visible_tasks:
-            checkbox = ft.Checkbox(
-                value=task["done"],
-                label=task["text"],
-                expand=True,
-                active_color=GREEN,
-                label_style=ft.TextStyle(
-                    color="#929992" if task["done"] else INK,
-                    decoration=ft.TextDecoration.LINE_THROUGH if task["done"] else None,
-                    size=14,
-                ),
-                on_change=lambda event, task_id=task["id"]: toggle_task(task_id),
+        for food in visible_foods:
+            status, status_color = expiry_status(food)
+            if food["eaten"]:
+                status, status_color = "食べました", GREEN
+            eaten_button = ft.TextButton(
+                "食べた" if not food["eaten"] else "未食に戻す",
+                icon=ft.Icons.CHECK_CIRCLE_OUTLINE if not food["eaten"] else ft.Icons.UNDO,
+                on_click=lambda event, food_id=food["id"]: toggle_eaten(food_id),
             )
             delete_button = ft.IconButton(
                 icon=ft.Icons.DELETE_OUTLINE,
                 icon_color=MUTED,
-                tooltip=f"「{task['text']}」を削除",
-                on_click=lambda event, task_id=task["id"]: delete_task(task_id),
+                tooltip=f"「{food['name']}」を削除",
+                on_click=lambda event, food_id=food["id"]: delete_food(food_id),
             )
+            food_content = [
+                ft.Row(
+                    [
+                        ft.Text(food["name"], size=15, color=INK, weight=ft.FontWeight.W_600, expand=True),
+                        ft.Text(status, size=12, color=status_color, weight=ft.FontWeight.BOLD),
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Row(
+                    [
+                        ft.Text(
+                            f"{EXPIRY_TYPES[food['expiry_type']]}：{food['expiry_date']}",
+                            size=12,
+                            color=MUTED,
+                            expand=True,
+                        ),
+                        eaten_button,
+                        delete_button,
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ]
+            if food.get("image"):
+                food_content.insert(
+                    0,
+                    ft.Image(
+                        src=food["image"],
+                        width=120,
+                        height=90,
+                        fit=ft.BoxFit.COVER,
+                        border_radius=6,
+                    ),
+                )
             rows.extend(
                 [
-                    ft.Row([checkbox, delete_button], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Container(
+                        content=ft.Column(food_content, spacing=2),
+                        padding=ft.Padding.symmetric(vertical=8),
+                    ),
                     ft.Divider(height=1, thickness=1, color="#DEDFD5"),
                 ]
             )
 
-        if not visible_tasks:
+        if not visible_foods:
             empty_text = (
-                "未完了のタスクはありません。いい調子！"
-                if current_filter == "active" and tasks
-                else "完了したタスクはまだありません。"
-                if current_filter == "done" and tasks
-                else "まずは、やることをひとつ書いてみましょう。"
+                "もうすぐ期限のものはありません。"
+                if current_filter == "soon"
+                else "まだ使った記録はありません。"
+                if current_filter == "eaten"
+                else "商品名と期限を入れてみましょう。"
             )
             rows = [
                 ft.Container(
@@ -181,31 +413,50 @@ def main(page: ft.Page):
                 )
             ]
 
-        task_list.controls = rows
+        food_list.controls = rows
         page.update()
 
-    for key, label in (("all", "すべて"), ("active", "未完了"), ("done", "完了")):
-        filter_buttons[key] = ft.TextButton(
-            label,
-            on_click=lambda event, value=key: set_filter(value),
-        )
+    for key, label in (("all", "すべて"), ("soon", "期限が近い"), ("eaten", "食べた")):
+        filter_buttons[key] = ft.TextButton(label, on_click=lambda event, value=key: set_filter(value))
 
     today = ft.Text(
-        __import__("datetime").date.today().strftime("%Y年%m月%d日"),
+        date.today().strftime("%Y年%m月%d日"),
         size=12,
         color=MUTED,
     )
-    composer = ft.Row(
+    composer = ft.Column(
         [
-            task_input,
-            ft.Button(
-                "追加  ＋",
-                on_click=add_task,
-                bgcolor=GREEN,
-                color="white",
-                height=48,
-                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)),
+            name_input,
+            ft.Row(
+                [
+                    expiry_input,
+                    expiry_type_input,
+                ],
+                spacing=8,
             ),
+            photo_preview,
+            privacy_note,
+            ft.Row(
+                [
+                    ft.OutlinedButton(
+                        "写真を撮る / 選ぶ",
+                        icon=ft.Icons.CAMERA_ALT,
+                        on_click=choose_photo,
+                        height=48,
+                    ),
+                    ft.Button(
+                        "登録 ＋",
+                        on_click=add_food,
+                        bgcolor=GREEN,
+                        color="white",
+                        height=48,
+                        expand=True,
+                        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)),
+                    ),
+                ],
+                spacing=8,
+            ),
+            message_text,
         ],
         spacing=10,
     )
@@ -217,14 +468,14 @@ def main(page: ft.Page):
                     ft.Row(
                         [
                             ft.Container(
-                                content=ft.Text("日", color="white", size=15, weight=ft.FontWeight.BOLD),
+                                content=ft.Text("食", color="white", size=15, weight=ft.FontWeight.BOLD),
                                 width=28,
                                 height=28,
                                 bgcolor=GREEN,
                                 border_radius=14,
                                 alignment=ft.Alignment.CENTER,
                             ),
-                            ft.Text("DAILY NOTE", size=12, color=GREEN, weight=ft.FontWeight.BOLD),
+                            ft.Text("TABEGORO", size=12, color=GREEN, weight=ft.FontWeight.BOLD),
                         ],
                         spacing=10,
                     ),
@@ -234,8 +485,8 @@ def main(page: ft.Page):
             ),
             ft.Column(
                 [
-                    ft.Text("今日の段取り", size=38, color=INK, weight=ft.FontWeight.W_600),
-                    ft.Text("ひとつずつ、進めていこう。", size=13, color=MUTED),
+                    ft.Text("たべごろ", size=38, color=INK, weight=ft.FontWeight.W_600),
+                    ft.Text("食品や薬、日焼け止めの期限をひと目で見て、使い忘れを防ぎます。", size=13, color=MUTED),
                 ],
                 spacing=4,
             ),
@@ -245,19 +496,15 @@ def main(page: ft.Page):
                         ft.Container(content=composer, padding=18, bgcolor=GREEN_LIGHT),
                         ft.Container(
                             content=ft.Row(
-                                [ft.Row(list(filter_buttons.values()), spacing=0), task_count],
+                                [ft.Row(list(filter_buttons.values()), spacing=0), food_count],
                                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                             ),
                             padding=ft.Padding(left=18, right=18, top=8, bottom=8),
                             border=ft.Border.only(bottom=ft.BorderSide(1, "#DEDFD5")),
                         ),
-                        ft.Container(content=task_list, padding=ft.Padding.symmetric(horizontal=18)),
+                        ft.Container(content=food_list, padding=ft.Padding.symmetric(horizontal=18)),
                         ft.Container(
-                            content=ft.Row(
-                                [progress_label, clear_done_button],
-                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
+                            content=summary_text,
                             padding=ft.Padding(left=18, right=18, top=8, bottom=8),
                             border=ft.Border.only(top=ft.BorderSide(1, "#DEDFD5")),
                         ),
@@ -270,6 +517,11 @@ def main(page: ft.Page):
                 border_radius=8,
                 shadow=ft.BoxShadow(blur_radius=28, color="#182D2314", offset=ft.Offset(0, 10)),
                 clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            ),
+            ft.Text(
+                "※期限表示は、未開封で表示どおりに保存した場合の目安です。開封後は期限にかかわらず早めに食べましょう。",
+                size=11,
+                color=MUTED,
             ),
         ],
         width=700,
