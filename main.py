@@ -1,24 +1,10 @@
-import base64
 import json
 import re
 from datetime import date, datetime, timedelta
-from io import BytesIO
-from mimetypes import guess_type
 from pathlib import Path
 from uuid import uuid4
 
 import flet as ft
-
-try:
-    import pytesseract
-except ModuleNotFoundError:  # optional OCR dependency
-    pytesseract = None
-
-try:
-    from PIL import Image
-except ModuleNotFoundError:  # optional OCR dependency
-    Image = None
-
 
 DATA_FILE = Path.home() / ".food_expiry_tracker.json"
 GREEN = "#2E6654"
@@ -82,19 +68,6 @@ def extract_expiry_from_text(text):
     return None
 
 
-def scan_expiry_from_image_bytes(image_bytes):
-    if not image_bytes:
-        return None
-    try:
-        image = Image.open(BytesIO(image_bytes)).convert("RGB")
-        text = pytesseract.image_to_string(image, lang="jpn+eng", config="--psm 6")
-    except Exception:
-        return None
-    if not text:
-        return None
-    return extract_expiry_from_text(text)
-
-
 def load_foods():
     try:
         foods = json.loads(DATA_FILE.read_text(encoding="utf-8"))
@@ -142,9 +115,6 @@ def main(page: ft.Page):
     foods = load_foods()
     current_filter = "all"
     current_category = "all"
-    selected_photo = None
-    photo_picker = ft.FilePicker()
-    page.services.append(photo_picker)
 
     name_input = ft.TextField(
         label="商品名（入力しなくてもOK）",
@@ -190,12 +160,6 @@ def main(page: ft.Page):
         border_color="#D4DED5",
         focused_border_color=GREEN,
         bgcolor="#FFFEFA",
-    )
-    photo_preview = ft.Container(visible=False)
-    privacy_note = ft.Text(
-        "写真はなくてもOKです。顔や個人情報が写る写真は避けてください。",
-        size=11,
-        color=MUTED,
     )
     message_text = ft.Text(size=12, color=CORAL, visible=False)
     food_list = ft.Column(spacing=0)
@@ -247,7 +211,7 @@ def main(page: ft.Page):
         render()
 
     def add_food(event):
-        nonlocal selected_photo, current_category
+        nonlocal current_category
         name = normalize_name(name_input.value)
         try:
             expiry_date = date.fromisoformat((expiry_input.value or "").strip())
@@ -265,72 +229,13 @@ def main(page: ft.Page):
             "category": category_input.value,
             "eaten": False,
         }
-        if selected_photo:
-            food["image"] = selected_photo
         foods.append(food)
         if persist():
             name_input.value = ""
             expiry_input.value = ""
-            selected_photo = None
-            photo_preview.content = None
-            photo_preview.visible = False
         current_category = "all"
         category_filter.value = "all"
         set_filter("all")
-
-    async def choose_photo(event):
-        nonlocal selected_photo
-        files = await photo_picker.pick_files(
-            dialog_title="商品の写真を撮る / 選ぶ",
-            file_type=ft.FilePickerFileType.IMAGE,
-            allow_multiple=False,
-            with_data=True,
-            compression_quality=70,
-        )
-        if not files:
-            return
-        photo = files[0]
-        if photo.bytes is None:
-            message_text.value = "写真を読み込めませんでした。もう一度お試しください。"
-            message_text.visible = True
-            page.update()
-            return
-        mime_type = guess_type(photo.name)[0] or "image/jpeg"
-        encoded_photo = base64.b64encode(photo.bytes).decode("ascii")
-        selected_photo = f"data:{mime_type};base64,{encoded_photo}"
-        detected = scan_expiry_from_image_bytes(photo.bytes)
-        if detected:
-            expiry_date, expiry_type = detected
-            expiry_input.value = expiry_date
-            expiry_type_input.value = expiry_type
-            message_text.value = f"写真から期限を読み取りました: {expiry_date}"
-            message_text.visible = True
-        else:
-            message_text.visible = False
-        photo_preview.content = ft.Row(
-            [
-                ft.Image(
-                    src=selected_photo,
-                    width=96,
-                    height=72,
-                    fit=ft.BoxFit.COVER,
-                    border_radius=6,
-                ),
-                ft.Text(f"写真を追加しました: {photo.name}", size=12, color=GREEN),
-                ft.TextButton("写真を外す", on_click=remove_photo),
-            ],
-            spacing=10,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-        photo_preview.visible = True
-        page.update()
-
-    def remove_photo(event):
-        nonlocal selected_photo
-        selected_photo = None
-        photo_preview.content = None
-        photo_preview.visible = False
-        page.update()
 
     def toggle_eaten(food_id):
         for food in foods:
@@ -428,17 +333,6 @@ def main(page: ft.Page):
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ]
-            if food.get("image"):
-                food_content.insert(
-                    0,
-                    ft.Image(
-                        src=food["image"],
-                        width=120,
-                        height=90,
-                        fit=ft.BoxFit.COVER,
-                        border_radius=6,
-                    ),
-                )
             rows.extend(
                 [
                     ft.Container(
@@ -496,23 +390,14 @@ def main(page: ft.Page):
                 ],
                 spacing=8,
             ),
-            photo_preview,
-            privacy_note,
             ft.Row(
                 [
-                    ft.OutlinedButton(
-                        "写真を撮る / 選ぶ",
-                        icon=ft.Icons.CAMERA_ALT,
-                        on_click=choose_photo,
-                        height=48,
-                    ),
                     ft.Button(
                         "登録 ＋",
                         on_click=add_food,
                         bgcolor=GREEN,
                         color="white",
                         height=48,
-                        expand=True,
                         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)),
                     ),
                 ],
