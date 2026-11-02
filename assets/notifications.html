@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#2e6654">
+    <title>通知設定 | たべごろ</title>
+    <style>
+      body { background: #f6f5ef; color: #202c2a; font: 16px system-ui, sans-serif; margin: 0; padding: 24px; }
+      main { background: #fffefa; border: 1px solid #e3e3d9; border-radius: 8px; margin: 8vh auto; max-width: 520px; padding: 24px; }
+      h1 { color: #2e6654; font-size: 24px; }
+      p { line-height: 1.7; }
+      button { background: #2e6654; border: 0; border-radius: 5px; color: white; cursor: pointer; font-size: 16px; margin: 8px 8px 8px 0; padding: 12px 16px; }
+      button.secondary { background: #77807b; }
+      #status { color: #77807b; min-height: 1.5em; overflow-wrap: anywhere; }
+      a { color: #2e6654; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>期限通知の設定</h1>
+      <p>通知を許可すると、期限が3日以内になった未使用の商品を、ブラウザを閉じていても通知します。Codespaceとこのサーバーが起動している間に限り配信されます。</p>
+      <button id="enable">通知を有効にする</button>
+      <button id="disable" class="secondary">通知を解除</button>
+      <button id="test" class="secondary">テスト通知</button>
+      <p id="status" role="status" aria-live="polite"></p>
+      <a href="/">アプリに戻る</a>
+    </main>
+    <script>
+      const status = document.querySelector("#status");
+      const urlBase64ToUint8Array = (value) => {
+        const padded = value + "=".repeat((4 - value.length % 4) % 4);
+        const raw = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+        return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+      };
+
+      async function getSubscription() {
+        if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+          throw new Error("このブラウザはプッシュ通知に対応していません。");
+        }
+        const registration = await navigator.serviceWorker.register("/service-worker.js", { scope: "/" });
+        return { registration, subscription: await registration.pushManager.getSubscription() };
+      }
+
+      document.querySelector("#enable").addEventListener("click", async () => {
+        try {
+          if (!("Notification" in window)) {
+            throw new Error("このブラウザは通知に対応していません。");
+          }
+          const permission = await Notification.requestPermission();
+          if (permission !== "granted") {
+            throw new Error("ブラウザの通知を許可してください。");
+          }
+          const { registration, subscription: current } = await getSubscription();
+          const publicKeyResponse = await fetch("/push/vapid-public-key");
+          if (!publicKeyResponse.ok) throw new Error("通知設定を読み込めませんでした。");
+          const { publicKey } = await publicKeyResponse.json();
+          const subscription = current || await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(publicKey),
+          });
+          const response = await fetch("/push/subscriptions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(subscription),
+          });
+          if (!response.ok) throw new Error("通知先を保存できませんでした。");
+          status.textContent = "通知を設定しました。テスト通知で受信を確認できます。";
+        } catch (error) {
+          status.textContent = error.message || "通知を設定できませんでした。";
+        }
+      });
+
+      document.querySelector("#disable").addEventListener("click", async () => {
+        try {
+          const { subscription } = await getSubscription();
+          if (!subscription) {
+            status.textContent = "通知は設定されていません。";
+            return;
+          }
+          const response = await fetch("/push/subscriptions", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ endpoint: subscription.endpoint }),
+          });
+          if (!response.ok) throw new Error("通知を解除できませんでした。");
+          await subscription.unsubscribe();
+          status.textContent = "通知を解除しました。";
+        } catch (error) {
+          status.textContent = error.message || "通知を解除できませんでした。";
+        }
+      });
+
+      document.querySelector("#test").addEventListener("click", async () => {
+        try {
+          const { subscription } = await getSubscription();
+          if (!subscription) throw new Error("先に通知を有効にしてください。");
+          const response = await fetch("/push/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ endpoint: subscription.endpoint }),
+          });
+          if (!response.ok) throw new Error(await response.text());
+          status.textContent = "テスト通知を送信しました。";
+        } catch (error) {
+          status.textContent = error.message || "テスト通知を送信できませんでした。";
+        }
+      });
+    </script>
+  </body>
+</html>
