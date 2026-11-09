@@ -7,6 +7,10 @@ import pytest
 import main
 
 
+def test_drinks_are_available_as_a_food_category():
+    assert "飲み物" in main.FOOD_CATEGORIES
+
+
 def test_edit_action_opens_inline_form(tmp_path, monkeypatch):
     food = {
         "id": "food-1",
@@ -35,7 +39,40 @@ def test_edit_action_opens_inline_form(tmp_path, monkeypatch):
     edit_fields = edited_food_list.controls[0].content.controls
     assert edit_fields[0].label == "商品名"
     assert edit_fields[1].label == "ジャンル"
-    assert edit_fields[2].controls[0].label == "期限（YYYY-MM-DD）"
+    assert edit_fields[2].label == "期限（YYYY-MM-DD）"
+
+
+def test_mobile_layout_stacks_inputs_and_product_actions(tmp_path, monkeypatch):
+    food = {
+        "id": "food-1",
+        "name": "牛乳",
+        "expiry_date": "2026-12-01",
+        "expiry_type": "best_before",
+        "category": "その他",
+        "eaten": False,
+    }
+    data_file = tmp_path / "foods.json"
+    data_file.write_text(json.dumps([food], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(main, "DATA_FILE", data_file)
+    page = SimpleNamespace(
+        width=375,
+        add=lambda *controls: setattr(page, "controls", controls),
+        update=lambda: None,
+    )
+
+    main.main(page)
+    page.on_resize(None)
+
+    app_content = page.controls[0].content
+    composer = app_content.controls[2].content.controls[0].content
+    assert composer.controls[2].content.__class__.__name__ == "Column"
+    assert composer.controls[3].content.__class__.__name__ == "Column"
+
+    food_list = app_content.controls[2].content.controls[5].content
+    product_details = food_list.controls[0].content.controls
+    assert len(product_details) == 3
+    action_row = product_details[2]
+    assert action_row.controls[1].controls[0].icon == main.ft.Icons.EDIT_OUTLINED
 
 
 def test_update_food_details_normalizes_name_and_expiry():

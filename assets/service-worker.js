@@ -9,7 +9,7 @@ self.addEventListener("push", (event) => {
   }
 
   event.waitUntil(
-    self.registration.showNotification(message.title || "たべごろ", {
+    self.registration.showNotification(message.title || "たべきりん", {
       body: message.body || "期限が近い商品があります。",
       tag: message.tag || "food-expiry",
       data: { url: message.url || "/" },

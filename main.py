@@ -39,7 +39,7 @@ EXPIRY_TYPES = {
     "use_by": "消費期限",
     "use_date": "使用期限",
 }
-FOOD_CATEGORIES = ("肉", "魚", "野菜", "果物", "お菓子", "その他")
+FOOD_CATEGORIES = ("肉", "魚", "野菜", "果物", "飲み物", "お菓子", "その他")
 DEFAULT_CATEGORY = "その他"
 
 
@@ -327,7 +327,7 @@ def create_app():
                 send_web_push,
                 subscription,
                 {
-                    "title": "たべごろ",
+                    "title": "たべきりん",
                     "body": "テスト通知が届きました。",
                     "tag": "food-expiry-test",
                     "url": "/",
@@ -463,7 +463,7 @@ def save_foods(foods):
 
 
 def main(page: ft.Page):
-    page.title = "たべごろ | 期限管理"
+    page.title = "たべきりん | 期限管理"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.bgcolor = PAPER
     page.padding = 24
@@ -572,6 +572,8 @@ def main(page: ft.Page):
         padding=12,
         visible=False,
     )
+    expiry_entry_layout = ft.Container()
+    composer_actions_layout = ft.Container()
 
     def persist():
         try:
@@ -730,6 +732,7 @@ def main(page: ft.Page):
             )
 
         rows = []
+        is_mobile = (getattr(page, "width", None) or 748) < 520
         for food in visible_foods:
             status, status_color = expiry_status(food)
             if food["eaten"]:
@@ -780,14 +783,13 @@ def main(page: ft.Page):
                         expiry_field.value,
                         category_field.value,
                     )
-
                 edit_expiry_input.on_submit = submit_food_edit
                 food_content = [
                     edit_name_input,
                     edit_category_input,
-                    ft.Row(
-                        [
-                            edit_expiry_input,
+                        edit_expiry_input,
+                        ft.Row(
+                            [
                             ft.TextButton(
                                 "保存",
                                 icon=ft.Icons.CHECK,
@@ -808,30 +810,58 @@ def main(page: ft.Page):
                     tooltip=f"「{food['name']}」を編集",
                     on_click=lambda event, food_id=food["id"]: set_editing_food(food_id),
                 )
-                food_content = [
-                    ft.Row(
-                        [
-                            ft.Text(food["name"], size=15, color=INK, weight=ft.FontWeight.W_600, expand=True),
-                            ft.Text(food["category"], size=11, color=GREEN),
-                            ft.Text(status, size=12, color=status_color, weight=ft.FontWeight.BOLD),
-                        ],
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    ft.Row(
-                        [
-                            ft.Text(
-                                f"{EXPIRY_TYPES[food['expiry_type']]}：{food['expiry_date']}",
-                                size=12,
-                                color=MUTED,
-                                expand=True,
-                            ),
-                            eaten_button,
-                            edit_button,
-                            delete_button,
-                        ],
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                ]
+                food_name = ft.Text(
+                    food["name"],
+                    size=15,
+                    color=INK,
+                    weight=ft.FontWeight.W_600,
+                    expand=True,
+                )
+                food_status = ft.Text(
+                    status,
+                    size=12,
+                    color=status_color,
+                    weight=ft.FontWeight.BOLD,
+                )
+                food_expiry = ft.Text(
+                    f"{EXPIRY_TYPES[food['expiry_type']]}：{food['expiry_date']}",
+                    size=12,
+                    color=MUTED,
+                    expand=True,
+                )
+                if is_mobile:
+                    food_content = [
+                        ft.Row(
+                            [food_name, food_status],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        ft.Row(
+                            [
+                                ft.Text(food["category"], size=11, color=GREEN),
+                                food_expiry,
+                            ],
+                            spacing=8,
+                        ),
+                        ft.Row(
+                            [
+                                eaten_button,
+                                ft.Row([edit_button, delete_button], spacing=0),
+                            ],
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                    ]
+                else:
+                    food_content = [
+                        ft.Row(
+                            [food_name, ft.Text(food["category"], size=11, color=GREEN), food_status],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        ft.Row(
+                            [food_expiry, eaten_button, edit_button, delete_button],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                    ]
             rows.extend(
                 [
                     ft.Container(
@@ -878,36 +908,36 @@ def main(page: ft.Page):
         size=12,
         color=MUTED,
     )
+    expiry_entry_layout.content = ft.Row(
+        [expiry_input, expiry_type_input],
+        spacing=8,
+    )
+    composer_actions_layout.content = ft.Row(
+        [
+            ft.Button(
+                "登録 ＋",
+                on_click=add_food,
+                bgcolor=GREEN,
+                color="white",
+                height=48,
+                expand=True,
+                style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)),
+            ),
+            ft.TextButton(
+                "期限通知を設定",
+                icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+                url="/notifications",
+            ),
+        ],
+        spacing=8,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
     composer = ft.Column(
         [
             name_input,
             category_input,
-            ft.Row(
-                [
-                    expiry_input,
-                    expiry_type_input,
-                ],
-                spacing=8,
-            ),
-            ft.Row(
-                [
-                    ft.Button(
-                        "登録 ＋",
-                        on_click=add_food,
-                        bgcolor=GREEN,
-                        color="white",
-                        height=48,
-                        expand=True,
-                        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)),
-                    ),
-                    ft.TextButton(
-                        "期限通知を設定",
-                        icon=ft.Icons.NOTIFICATIONS_OUTLINED,
-                        url="/notifications",
-                    ),
-                ],
-                spacing=8,
-            ),
+            expiry_entry_layout,
+            composer_actions_layout,
             message_text,
         ],
         spacing=10,
@@ -927,7 +957,7 @@ def main(page: ft.Page):
                                 border_radius=14,
                                 alignment=ft.Alignment.CENTER,
                             ),
-                            ft.Text("TABEGORO", size=12, color=GREEN, weight=ft.FontWeight.BOLD),
+                            ft.Text("TABEKIRIN", size=12, color=GREEN, weight=ft.FontWeight.BOLD),
                         ],
                         spacing=10,
                     ),
@@ -937,7 +967,7 @@ def main(page: ft.Page):
             ),
             ft.Column(
                 [
-                    ft.Text("たべごろ", size=38, color=INK, weight=ft.FontWeight.W_600),
+                    ft.Text("たべきりん", size=38, color=INK, weight=ft.FontWeight.W_600),
                     ft.Text("食品や薬、日焼け止めの期限をひと目で見て、使い忘れを防ぎます。", size=13, color=MUTED),
                 ],
                 spacing=4,
@@ -992,15 +1022,72 @@ def main(page: ft.Page):
     app_container = ft.Container(content=content, width=700, padding=ft.Padding.only(top=18, bottom=32))
     workspace_card = content.controls[2]
 
+    def set_composer_layout(is_mobile):
+        if is_mobile:
+            expiry_type_input.width = None
+            expiry_entry_layout.content = ft.Column(
+                [expiry_input, expiry_type_input],
+                spacing=8,
+            )
+            composer_actions_layout.content = ft.Column(
+                [
+                    ft.Button(
+                        "登録 ＋",
+                        on_click=add_food,
+                        bgcolor=GREEN,
+                        color="white",
+                        height=48,
+                        expand=True,
+                        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)),
+                    ),
+                    ft.TextButton(
+                        "期限通知を設定",
+                        icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+                        url="/notifications",
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=4,
+            )
+        else:
+            expiry_type_input.width = 170
+            expiry_entry_layout.content = ft.Row(
+                [expiry_input, expiry_type_input],
+                spacing=8,
+            )
+            composer_actions_layout.content = ft.Row(
+                [
+                    ft.Button(
+                        "登録 ＋",
+                        on_click=add_food,
+                        bgcolor=GREEN,
+                        color="white",
+                        height=48,
+                        expand=True,
+                        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)),
+                    ),
+                    ft.TextButton(
+                        "期限通知を設定",
+                        icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+                        url="/notifications",
+                    ),
+                ],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+
     def resize_page(event):
         viewport_width = page.width or 748
-        page.padding = 12 if viewport_width < 520 else 24
+        is_mobile = viewport_width < 520
+        page.padding = 12 if is_mobile else 24
         content_width = min(700, max(272, viewport_width - page.padding * 2))
         app_container.width = content_width
         content.width = content_width
         workspace_card.width = content_width
-        page.update()
+        set_composer_layout(is_mobile)
+        render()
 
+    set_composer_layout((getattr(page, "width", None) or 748) < 520)
     page.on_resize = resize_page
     page.add(app_container)
     render()
